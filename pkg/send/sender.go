@@ -87,7 +87,7 @@ type Sender struct {
 func (s *Sender) reloadSender() {
 	s.aggregatorURL = config.Cfg.AggregatorURL
 	s.aggregatorSyncPath = strings.Join([]string{"/aggregator/clusters/", config.Cfg.ClusterName, "/sync"}, "")
-	if !config.Cfg.DeployedInHub {
+	if !config.Cfg.DeployedInHub && !config.Cfg.ExternalAccess {
 		s.aggregatorSyncPath = strings.Join([]string{"/", config.Cfg.ClusterName, "/aggregator/sync"}, "")
 	}
 	s.httpClient = getHTTPSClient()
@@ -106,7 +106,7 @@ func NewSender(rec *reconciler.Reconciler, aggregatorURL, clusterName string) *S
 		rec:                rec,
 	}
 
-	if !config.Cfg.DeployedInHub {
+	if !config.Cfg.DeployedInHub && !config.Cfg.ExternalAccess {
 		s.aggregatorSyncPath = strings.Join([]string{"/", clusterName, "/aggregator/sync"}, "")
 	}
 
@@ -162,7 +162,7 @@ func (s *Sender) completePayload() (Payload, int, int) {
 }
 
 // Send will retry after recoverable errors.
-//  - Aggregator busy
+//   - Aggregator busy
 func (s *Sender) sendWithRetry(payload Payload, expectedTotalResources int, expectedTotalEdges int) error {
 	retry := 0
 	for {
@@ -199,7 +199,18 @@ func (s *Sender) send(payload Payload, expectedTotalResources int, expectedTotal
 		return err
 	}
 	payloadBuffer := bytes.NewBuffer(payloadBytes)
-	resp, err := s.httpClient.Post(s.aggregatorURL+s.aggregatorSyncPath, "application/json", payloadBuffer)
+
+	req, err := http.NewRequest("POST", s.aggregatorURL+s.aggregatorSyncPath, payloadBuffer)
+	if err != nil {
+		return err
+	}
+	if config.Cfg.ExternalAuth {
+		req.SetBasicAuth(config.Cfg.ExternalAuthUsername, config.Cfg.ExternalAuthPassword)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := s.httpClient.Do(req)
+
+	// resp, err := s.httpClient.Post(s.aggregatorURL+s.aggregatorSyncPath, "application/json", payloadBuffer)
 	if resp != nil {
 		defer resp.Body.Close()
 	}

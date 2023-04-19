@@ -14,6 +14,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,7 +29,7 @@ import (
 const (
 	COLLECTOR_API_VERSION      = "2.8.0"
 	DEFAULT_AGGREGATOR_URL     = "https://localhost:3010" // this will be deprecated in the future
-	DEFAULT_AGGREGATOR_HOST    = "https://localhost"
+	DEFAULT_AGGREGATOR_HOST    = "localhost"
 	DEFAULT_AGGREGATOR_PORT    = "3010"
 	DEFAULT_CLUSTER_NAME       = "local-cluster"
 	DEFAULT_POD_NAMESPACE      = "open-cluster-management"
@@ -42,20 +43,24 @@ const (
 // Configuration options for the search-collector.
 type Config struct {
 	AggregatorConfig     *rest.Config // Config object for hub. Used to get TLS credentials.
-	AggregatorConfigFile string       `env:"HUB_CONFIG"`         // Config file for hub. Will be mounted in a secret.
-	AggregatorURL        string       `env:"AGGREGATOR_URL"`     // URL of the Aggregator, includes port but not any path
-	AggregatorHost       string       `env:"AGGREGATOR_HOST"`    // Host of the Aggregator
-	AggregatorPort       string       `env:"AGGREGATOR_PORT"`    // Port of the Aggregator
-	ClusterName          string       `env:"CLUSTER_NAME"`       // The name of this cluster
-	ClusterNamespace     string       `env:"CLUSTER_NAMESPACE"`  // The namespace of this cluster
-	PodNamespace         string       `env:"POD_NAMESPACE"`      // The namespace of this pod
-	DeployedInHub        bool         `env:"DEPLOYED_IN_HUB"`    // Tracks if deployed in the Hub or Managed cluster
-	HeartbeatMS          int          `env:"HEARTBEAT_MS"`       // Interval(ms) to send empty payload to ensure connection
-	KubeConfig           string       `env:"KUBECONFIG"`         // Local kubeconfig path
-	MaxBackoffMS         int          `env:"MAX_BACKOFF_MS"`     // Maximum backoff in ms to wait after error
-	RediscoverRateMS     int          `env:"REDISCOVER_RATE_MS"` // Interval(ms) to poll for changes to CRDs
-	ReportRateMS         int          `env:"REPORT_RATE_MS"`     // Interval(ms) to send changes to the aggregator
-	RuntimeMode          string       `env:"RUNTIME_MODE"`       // Running mode (development or production)
+	AggregatorConfigFile string       `env:"HUB_CONFIG"`             // Config file for hub. Will be mounted in a secret.
+	AggregatorURL        string       `env:"AGGREGATOR_URL"`         // URL of the Aggregator, includes port but not any path
+	AggregatorHost       string       `env:"AGGREGATOR_HOST"`        // Host of the Aggregator
+	AggregatorPort       string       `env:"AGGREGATOR_PORT"`        // Port of the Aggregator
+	ClusterName          string       `env:"CLUSTER_NAME"`           // The name of this cluster
+	ClusterNamespace     string       `env:"CLUSTER_NAMESPACE"`      // The namespace of this cluster
+	PodNamespace         string       `env:"POD_NAMESPACE"`          // The namespace of this pod
+	DeployedInHub        bool         `env:"DEPLOYED_IN_HUB"`        // Tracks if deployed in the Hub or Managed cluster
+	HeartbeatMS          int          `env:"HEARTBEAT_MS"`           // Interval(ms) to send empty payload to ensure connection
+	KubeConfig           string       `env:"KUBECONFIG"`             // Local kubeconfig path
+	MaxBackoffMS         int          `env:"MAX_BACKOFF_MS"`         // Maximum backoff in ms to wait after error
+	RediscoverRateMS     int          `env:"REDISCOVER_RATE_MS"`     // Interval(ms) to poll for changes to CRDs
+	ReportRateMS         int          `env:"REPORT_RATE_MS"`         // Interval(ms) to send changes to the aggregator
+	RuntimeMode          string       `env:"RUNTIME_MODE"`           // Running mode (development or production)
+	ExternalAccess       bool         `env:"EXTERNAL_ACCESS"`        // Using external access to hub
+	ExternalAuthUsername string       `env:"EXTERNAL_AUTH_USERNAME"` // Username for external auth to hub
+	ExternalAuthPassword string       `env:"EXTERNAL_AUTH_PASSWORD"` // Password for external auth to hub
+	ExternalAuth         bool         // Using external auth to hub
 }
 
 var Cfg = Config{}
@@ -93,11 +98,16 @@ func InitConfig() {
 
 	//If environment variables are set for aggregator host and port, use those to set the AggregatorURL
 	if aggHostPresent && aggPortPresent && aggHost != "" && aggPort != "" {
-		Cfg.AggregatorURL = net.JoinHostPort(aggHost, aggPort)
-		setDefault(&Cfg.AggregatorURL, "", net.JoinHostPort(DEFAULT_AGGREGATOR_HOST, DEFAULT_AGGREGATOR_PORT))
+		//If host contains a colon, as found in literal IPv6 addresses, then JoinHostPort returns "[host]:port".
+		u := &url.URL{
+			Scheme: "https",
+			Host:   net.JoinHostPort(Cfg.AggregatorHost, Cfg.AggregatorPort),
+		}
+		Cfg.AggregatorURL = u.String()
 	} else { // Else use the default AggregatorURL
 		setDefault(&Cfg.AggregatorURL, "AGGREGATOR_URL", DEFAULT_AGGREGATOR_URL)
 	}
+	glog.Info("AggregatorURL set to: ", Cfg.AggregatorURL)
 
 	setDefaultInt(&Cfg.HeartbeatMS, "HEARTBEAT_MS", DEFAULT_HEARTBEAT_MS)
 	setDefaultInt(&Cfg.MaxBackoffMS, "MAX_BACKOFF_MS", DEFAULT_MAX_BACKOFF_MS)
@@ -111,6 +121,27 @@ func InitConfig() {
 	}
 	setDefault(&Cfg.KubeConfig, "KUBECONFIG", defaultKubePath)
 
+	// Special logic for setting EXTERNAL_ACCESS with default to false
+	if val := os.Getenv("EXTERNAL_ACCESS"); val != "" {
+		glog.Infof("Using EXTERNAL_ACCESS from environment: %s", val)
+		var err error
+		Cfg.ExternalAccess, err = strconv.ParseBool(val)
+		if err != nil {
+			glog.Error("Error parsing env EXTERNAL_ACCESS.  Expected a bool.  Original error: ", err)
+			glog.Info("Leaving flag unchanged, assuming it is not an external access")
+		}
+	} else if !Cfg.ExternalAccess {
+		glog.Info("No EXTERNAL_ACCESS from file or environment, assuming it is not an external access")
+	}
+	setDefault(&Cfg.ExternalAuthUsername, "EXTERNAL_AUTH_USERNAME", "")
+	setDefault(&Cfg.ExternalAuthPassword, "EXTERNAL_AUTH_PASSWORD", "")
+	if Cfg.ExternalAuthUsername != "" && Cfg.ExternalAuthPassword != "" {
+		glog.Info("Using EXTERNAL_AUTH_USERNAME and EXTERNAL_AUTH_PASSWORD from environment")
+		Cfg.ExternalAuth = true
+	}
+	if Cfg.ExternalAccess && !Cfg.ExternalAuth {
+		glog.Fatal("EXTERNAL_ACCESS is set to true, but EXTERNAL_AUTH_USERNAME or EXTERNAL_AUTH_PASSWORD is not set")
+	}
 	// Special logic for setting DEPLOYED_IN_HUB with default to false
 	if val := os.Getenv("DEPLOYED_IN_HUB"); val != "" {
 		glog.Infof("Using DEPLOYED_IN_HUB from environment: %s", val)
@@ -120,15 +151,22 @@ func InitConfig() {
 			glog.Error("Error parsing env DEPLOYED_IN_HUB.  Expected a bool.  Original error: ", err)
 			glog.Info("Leaving flag unchanged, assuming it is a Klusterlet")
 		}
-	} else if !Cfg.DeployedInHub {
-		glog.Info("No DEPLOY_IN_HUB from file or environment, assuming it is a Klusterlet")
+	} else if !Cfg.DeployedInHub && !Cfg.ExternalAccess {
+		glog.Info("No DEPLOY_IN_HUB and EXTERNAL_ACCESS from file or environment, assuming it is a Klusterlet")
 	}
 	setDefault(&Cfg.AggregatorConfigFile, "HUB_CONFIG", "")
 
+	glog.Info("Config loaded from environment: ", Cfg)
+	glog.Info("Aggregator URL: ", Cfg.AggregatorURL)
+
 	if Cfg.DeployedInHub && Cfg.AggregatorConfigFile != "" {
 		glog.Fatal("Config mismatch: DEPLOYED_IN_HUB is true, but HUB_CONFIG is set to connect to another hub")
-	} else if !Cfg.DeployedInHub && Cfg.AggregatorConfigFile == "" {
+	} else if !Cfg.DeployedInHub && Cfg.AggregatorConfigFile == "" && !Cfg.ExternalAccess {
 		glog.Fatal("Config mismatch: DEPLOYED_IN_HUB is false, but no HUB_CONFIG is set to connect to another hub")
+	} else if Cfg.ExternalAccess && Cfg.AggregatorConfigFile != "" {
+		glog.Fatal("Config mismatch: EXTERNAL_ACCESS is true, but HUB_CONFIG is set to connect to another hub")
+	} else if Cfg.ExternalAccess && Cfg.DeployedInHub {
+		glog.Fatal("Config mismatch: EXTERNAL_ACCESS is true, but DEPLOYED_IN_HUB is true")
 	}
 
 	if Cfg.AggregatorConfigFile != "" {

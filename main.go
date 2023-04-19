@@ -46,7 +46,7 @@ func main() {
 		glog.Info("Built from git commit: ", commit)
 	}
 
-	if !config.Cfg.DeployedInHub {
+	if !config.Cfg.DeployedInHub && !config.Cfg.ExternalAccess {
 		leaseReconciler := lease.LeaseReconciler{
 			HubKubeClient:        config.GetKubeClient(config.Cfg.AggregatorConfig),
 			LocalKubeClient:      config.GetKubeClient(config.GetKubeConfig()),

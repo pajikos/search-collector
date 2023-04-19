@@ -24,31 +24,37 @@ import (
 )
 
 func getHTTPSClient() (client http.Client) {
-
+	tlsCfg := &tls.Config{
+		MinVersion:               tls.VersionTLS12,
+		CurvePreferences:         []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
+		PreferServerCipherSuites: true,
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+		},
+	}
 	// Klusterlet deployment: Get httpClient using the mounted kubeconfig.
 	if !config.Cfg.DeployedInHub {
-		config.Cfg.AggregatorConfig.NegotiatedSerializer = unstructuredscheme.NewUnstructuredNegotiatedSerializer()
-		aggregatorRESTClient, err := rest.UnversionedRESTClientFor(config.Cfg.AggregatorConfig)
-		if err != nil {
-			// Exit because this is an unrecoverable configuration problem.
-			glog.Fatal("Error getting httpClient from kubeconfig. Original error: ", err)
+		if config.Cfg.ExternalAccess {
+			// External access: no need to use the mounted kubeconfig or self-signed certificates.
+			tr := &http.Transport{
+				TLSClientConfig: tlsCfg,
+			}
+			return http.Client{Transport: tr}
+		} else {
+			config.Cfg.AggregatorConfig.NegotiatedSerializer = unstructuredscheme.NewUnstructuredNegotiatedSerializer()
+			aggregatorRESTClient, err := rest.UnversionedRESTClientFor(config.Cfg.AggregatorConfig)
+			if err != nil {
+				// Exit because this is an unrecoverable configuration problem.
+				glog.Fatal("Error getting httpClient from kubeconfig. Original error: ", err)
+			}
+			client = *(aggregatorRESTClient.Client)
+			return client
 		}
-		client = *(aggregatorRESTClient.Client)
-		return client
+		
 	} else {
 		// Hub deployment:
 		// Generate TLS config using the mounted certificates. If certificates aren't found wee use
 		// insecure TLS connection (InsecureSkipVerify). This should only happen during development.
-		tlsCfg := &tls.Config{
-			MinVersion:               tls.VersionTLS12,
-			CurvePreferences:         []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
-			PreferServerCipherSuites: true,
-			CipherSuites: []uint16{
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			},
-			// RootCAs:      caCertPool,
-			// Certificates: []tls.Certificate{cert},
-		}
 		caCert, err := ioutil.ReadFile("./sslcert/tls.crt")
 		cert, err2 := tls.LoadX509KeyPair("./sslcert/tls.crt", "./sslcert/tls.key")
 		if err != nil || err2 != nil {
